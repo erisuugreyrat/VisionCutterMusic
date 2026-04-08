@@ -7,7 +7,7 @@ import { detectBpm, getAudioBufferFromFile, getAudioDuration } from '@/lib/audio
 import { formatDuration, formatFileSize } from '@/lib/utils/helpers';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { initFalClient } from '@/lib/fal/client';
+import { initFalClient } from '@/lib/magichour/client';
 
 export function AudioStep() {
   const {

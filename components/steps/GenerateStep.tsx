@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -19,12 +19,32 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useAppStore } from '@/stores/app-store';
-import { initFalClient, generateImage, generateVideo } from '@/lib/fal/client';
+import {
+  initFalClient,
+  generateImage,
+  generateVideo,
+  type VideoModel,
+  type ImageModel,
+  type ImageResolution,
+} from '@/lib/magichour/client';
 import { Card, CardContent, Button, Progress } from '@/components/ui';
 
-// FAL.ai pricing for Grok Imagine
-const COST_PER_IMAGE = 0.02; // $0.02 per image
-const COST_PER_VIDEO = 0.052; // $0.05 per second + $0.002 for image input = $0.052 for 1s video
+const COST_PER_IMAGE = 0.02;
+const COST_PER_VIDEO = 0.052;
+type Quality = 'low' | 'medium' | 'high';
+type ExplicitVideoModel = Exclude<VideoModel, 'default'>;
+
+const MODEL_DURATIONS: Record<ExplicitVideoModel, number[]> = {
+  'ltx-2': [3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30],
+  seedance: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  'kling-2.5': [5, 10],
+  'kling-3.0': [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  'veo3.1': [4, 6, 8, 16, 24, 32, 40, 48, 56],
+  'sora-2': [4, 8, 12, 24, 36, 48, 60],
+  'kling-1.6': [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60],
+  'kling-2.5-audio': [5, 10],
+  'veo3.1-audio': [4, 6, 8, 16, 24, 32, 40, 48, 56],
+};
 
 interface SortableImageCardProps {
   scene: {
@@ -42,6 +62,11 @@ interface SortableImageCardProps {
   onPreview: (type: 'image' | 'video', url: string, prompt: string) => void;
 }
 
+function mediaSrc(url: string): string {
+  if (url.startsWith('/')) return url;
+  return `/api/proxy?url=${encodeURIComponent(url)}`;
+}
+
 function SortableImageCard({
   scene,
   index,
@@ -55,167 +80,70 @@ function SortableImageCard({
     id: scene.id,
   });
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  };
-
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
   const isGeneratingImage = scene.status === 'generating-image';
   const isGeneratingVideo = scene.status === 'generating-video';
-  const hasImage = scene.status !== 'pending' && scene.status !== 'generating-image' && scene.imageUrl && !imageError;
-  const hasVideo = scene.status === 'video-ready' && scene.videoUrl;
-  const hasError = scene.status === 'error' || imageError;
-
-  const getProxiedUrl = (url: string) => `/api/proxy?url=${encodeURIComponent(url)}`;
+  const hasImage = scene.status !== 'pending' && scene.status !== 'generating-image' && !!scene.imageUrl && !imageError;
+  const hasVideo = scene.status === 'video-ready' && !!scene.videoUrl;
 
   return (
     <div ref={setNodeRef} style={style}>
-      <Card variant="interactive" className={`group overflow-hidden ${isDragging ? 'border-[var(--red)] shadow-[6px_6px_0_var(--red)]' : ''}`}>
+      <Card variant="interactive" className={`group overflow-hidden ${isDragging ? 'border-[var(--red)]' : ''}`}>
         <div className="aspect-video bg-[var(--paper-dark)] relative overflow-hidden border-b-2 border-[var(--ink)]">
           {scene.imageUrl && !imageError && (
             <img
-              src={getProxiedUrl(scene.imageUrl)}
+              src={mediaSrc(scene.imageUrl)}
               alt={scene.prompt}
-              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105 cursor-pointer"
+              className="w-full h-full object-cover cursor-pointer"
               onClick={() => {
-                if (hasVideo && scene.videoUrl) {
-                  onPreview('video', scene.videoUrl, scene.prompt);
-                } else if (hasImage && scene.imageUrl) {
-                  onPreview('image', scene.imageUrl, scene.prompt);
-                }
+                if (hasVideo && scene.videoUrl) onPreview('video', scene.videoUrl, scene.prompt);
+                else if (hasImage && scene.imageUrl) onPreview('image', scene.imageUrl, scene.prompt);
               }}
-              onError={() => {
-                console.error('Image failed to load:', scene.imageUrl);
-                setImageError(true);
-              }}
+              onError={() => setImageError(true)}
             />
           )}
 
-          {/* Image load error state */}
-          {imageError && scene.imageUrl && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--paper-dark)]">
-              <div className="text-center px-4">
-                <svg className="w-8 h-8 text-[var(--yellow)] mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-                <p className="text-xs text-[var(--yellow)]">Image expired</p>
-                <p className="text-xs text-[var(--text-muted)]">Click regenerate</p>
-              </div>
-            </div>
-          )}
-
-          {hasVideo && (
-            <div
-              className="absolute inset-0 flex items-center justify-center bg-[var(--ink)]/60 cursor-pointer"
-              onClick={() => scene.videoUrl && onPreview('video', scene.videoUrl, scene.prompt)}
-            >
-              <div className="w-14 h-14 bg-[var(--paper)] flex items-center justify-center">
-                <svg className="w-6 h-6 text-[var(--ink)] ml-1" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              </div>
-            </div>
-          )}
-
-          {(isGeneratingImage || isGeneratingVideo) && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--paper)]/90">
-              <div className="text-center">
-                <div className="w-10 h-10 border-2 border-[var(--ink)] border-t-transparent animate-spin mx-auto mb-3" />
-                <p className="text-sm font-mono uppercase tracking-wider text-[var(--text-secondary)]">
-                  {isGeneratingImage ? 'Creating...' : 'Animating...'}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {hasError && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--red-soft)]">
-              <div className="text-center px-4">
-                <svg className="w-8 h-8 text-[var(--red)] mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-xs text-[var(--red)] line-clamp-2">{scene.error}</p>
-              </div>
-            </div>
-          )}
-
-          {scene.status === 'pending' && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <svg className="w-12 h-12 text-[var(--text-muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </div>
-          )}
-
-          {/* Drag Handle */}
           <div
             {...attributes}
             {...listeners}
             className="absolute top-2 left-2 p-2 bg-[var(--ink)] cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity"
           >
-            <svg className="w-4 h-4 text-[var(--paper)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
-            </svg>
+            <span className="text-[var(--paper)] text-xs">≡</span>
           </div>
 
-          {/* Scene Number */}
           <div className="absolute top-2 right-2 w-8 h-8 bg-[var(--red)] flex items-center justify-center">
             <span className="font-mono text-xs text-white">{String(index + 1).padStart(2, '0')}</span>
           </div>
 
-          {/* Status Badge */}
-          {hasImage && !hasVideo && scene.status === 'image-ready' && (
-            <div className="absolute bottom-2 left-2 px-2 py-1 bg-[var(--cyan)] border border-[var(--cyan)]">
-              <span className="text-xs font-mono uppercase tracking-wider text-[var(--ink)]">Image</span>
-            </div>
-          )}
-          {hasVideo && (
-            <div className="absolute bottom-2 left-2 px-2 py-1 bg-[var(--red)] border border-[var(--red)]">
-              <span className="text-xs font-mono uppercase tracking-wider text-white">Video</span>
+          {(isGeneratingImage || isGeneratingVideo) && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--paper)]/90">
+              <p className="text-sm font-mono uppercase tracking-wider text-[var(--text-secondary)]">
+                {isGeneratingImage ? 'Creating...' : 'Animating...'}
+              </p>
             </div>
           )}
         </div>
 
         <CardContent className="p-3">
-          <p className="text-xs text-[var(--text-muted)] line-clamp-2 mb-3 min-h-[2.5rem]">
-            {scene.prompt}
-          </p>
-
+          <p className="text-xs text-[var(--text-muted)] line-clamp-2 mb-3 min-h-[2.5rem]">{scene.prompt}</p>
           <div className="flex gap-2">
-            {hasImage && !hasVideo && scene.status === 'image-ready' && (
-              <Button
-                size="sm"
-                variant="red"
-                onClick={() => onGenerateVideo(scene.id)}
-                className="flex-1 text-xs"
-              >
-                Animate
+            {hasImage && !isGeneratingVideo && (
+              <Button size="sm" variant="red" onClick={() => onGenerateVideo(scene.id)} className="flex-1 text-xs">
+                {hasVideo ? 'Re-animate' : 'Animate'}
               </Button>
             )}
-
             {hasImage && (
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => onRegenerate(scene.id)}
-                className="text-xs"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
+              <Button size="sm" variant="secondary" onClick={() => onRegenerate(scene.id)} className="text-xs">
+                ↻
               </Button>
             )}
-
             <Button
               size="sm"
               variant="ghost"
               onClick={() => onDelete(scene.id)}
               className="text-[var(--red)] hover:bg-[var(--red-soft)]"
             >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
+              ✕
             </Button>
           </div>
         </CardContent>
@@ -240,31 +168,47 @@ export function GenerateStep() {
   } = useAppStore();
 
   const [showCostConfirm, setShowCostConfirm] = useState<'images' | 'videos' | null>(null);
-  const [showAnimatePopup, setShowAnimatePopup] = useState(false);
   const [previewMedia, setPreviewMedia] = useState<{ type: 'image' | 'video'; url: string; prompt: string } | null>(null);
+
+  // VIDEO SETTINGS
+  const [videoModel, setVideoModel] = useState<ExplicitVideoModel>('ltx-2');
+  const [videoQuality, setVideoQuality] = useState<Quality>('medium');
+  const [videoDuration, setVideoDuration] = useState<number>(5);
+  const [isPromptToVideo, setIsPromptToVideo] = useState(false);
+
+  // IMAGE SETTINGS
+  const [enableImageAdvanced, setEnableImageAdvanced] = useState(false);
+  const [imageModel, setImageModel] = useState<ImageModel>('default');
+  const [imageResolution, setImageResolution] = useState<ImageResolution>('auto');
+  const [imageTool, setImageTool] = useState('general');
+
+  const allowedDurations = useMemo(() => MODEL_DURATIONS[videoModel], [videoModel]);
+
+  useEffect(() => {
+    if (!allowedDurations.includes(videoDuration)) {
+      setVideoDuration(allowedDurations[0]);
+    }
+  }, [allowedDurations, videoDuration]);
+
+  useEffect(() => {
+    initFalClient(falApiKey || '');
+  }, [falApiKey]);
+
+  useEffect(() => {
+    console.log('[GenerateStep] selected videoModel:', videoModel);
+  }, [videoModel]);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    })
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
-
-  useEffect(() => {
-    if (falApiKey) {
-      initFalClient(falApiKey);
-    }
-  }, [falApiKey]);
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-
-    if (over && active.id !== over.id) {
-      const oldIndex = scenes.findIndex((s) => s.id === active.id);
-      const newIndex = scenes.findIndex((s) => s.id === over.id);
-      const newScenes = arrayMove(scenes, oldIndex, newIndex);
-      setScenes(newScenes);
-    }
+    if (!over || active.id === over.id) return;
+    const oldIndex = scenes.findIndex((s) => s.id === active.id);
+    const newIndex = scenes.findIndex((s) => s.id === over.id);
+    setScenes(arrayMove(scenes, oldIndex, newIndex));
   };
 
   const generateSingleImage = async (sceneId: string) => {
@@ -275,113 +219,107 @@ export function GenerateStep() {
 
     try {
       const fullPrompt = scene.prompt + selectedStyle.suffix;
-      const result = await generateImage(fullPrompt, aspectRatio);
-      updateScene(sceneId, {
-        status: 'image-ready',
-        imageUrl: result.imageUrl,
-      });
+      const result = await generateImage(
+        fullPrompt,
+        aspectRatio,
+        undefined,
+        sceneId,
+        enableImageAdvanced
+          ? {
+              model: imageModel,
+              resolution: imageResolution,
+              tool: imageTool,
+              imageCount: 1,
+            }
+          : undefined
+      );
+      updateScene(sceneId, { status: 'image-ready', imageUrl: result.imageUrl, videoUrl: undefined });
     } catch (error) {
-      updateScene(sceneId, {
-        status: 'error',
-        error: error instanceof Error ? error.message : 'Generation failed',
-      });
+      updateScene(sceneId, { status: 'error', error: error instanceof Error ? error.message : 'Generation failed' });
     }
   };
 
   const generateSingleVideo = async (sceneId: string) => {
     const scene = scenes.find((s) => s.id === sceneId);
-    if (!scene || !scene.imageUrl) return;
+    if (!scene) return;
 
-    updateScene(sceneId, { status: 'generating-video', error: undefined });
+    if (isPromptToVideo) {
+      updateScene(sceneId, { status: 'error', error: 'Prompt-to-Video is not supported by this endpoint.' });
+      return;
+    }
+
+    if (!scene.imageUrl) {
+      updateScene(sceneId, { status: 'error', error: 'No image found. Generate image first.' });
+      return;
+    }
+
+    updateScene(sceneId, { status: 'generating-video', error: undefined, videoUrl: undefined });
 
     try {
-      // Use scene prompt for motion description
-      const motionPrompt = `subtle cinematic motion, gentle camera movement, ${scene.prompt}`;
-      const result = await generateVideo(scene.imageUrl, motionPrompt);
-      updateScene(sceneId, {
-        status: 'video-ready',
-        videoUrl: result.videoUrl,
+      const motionPrompt = `subtle cinematic motion, gentle camera movement, ${scene.prompt} ${selectedStyle?.suffix || ''}`.trim();
+      const chosenModel: ExplicitVideoModel = videoModel;
+
+      console.log('[GenerateStep] calling generateVideo with model:', chosenModel);
+
+      const result = await generateVideo(scene.imageUrl, motionPrompt, undefined, sceneId, {
+        model: chosenModel,
+        quality: videoQuality,
+        duration: videoDuration,
       });
+
+      updateScene(sceneId, { status: 'video-ready', videoUrl: result.videoUrl });
     } catch (error) {
-      updateScene(sceneId, {
-        status: 'error',
-        error: error instanceof Error ? error.message : 'Video generation failed',
-      });
+      updateScene(sceneId, { status: 'error', error: error instanceof Error ? error.message : 'Video generation failed' });
     }
   };
 
-  const CONCURRENCY_LIMIT = 5;
-
-  // Pool-based concurrency: always keeps CONCURRENCY_LIMIT tasks running
   const runWithPool = async <T,>(
     items: T[],
     task: (item: T) => Promise<void>,
     onProgress: (completed: number, total: number) => void
   ) => {
+    const limit = 60;
     let completed = 0;
     let index = 0;
     const total = items.length;
 
     const runNext = async (): Promise<void> => {
       if (index >= total) return;
-      const currentIndex = index++;
-      const item = items[currentIndex];
+      const item = items[index++];
       await task(item);
       completed++;
       onProgress(completed, total);
-      await runNext(); // Start next item as soon as this one finishes
+      await runNext();
     };
 
-    // Start initial pool of concurrent tasks
-    const initialTasks = Array(Math.min(CONCURRENCY_LIMIT, total))
-      .fill(null)
-      .map(() => runNext());
-
-    await Promise.all(initialTasks);
+    await Promise.all(Array(Math.min(limit, total)).fill(null).map(() => runNext()));
   };
 
   const generateAllImages = async () => {
-    if (!falApiKey) return;
-
+    const pendingScenes = scenes.filter((s) => s.status === 'pending' || s.status === 'error');
+    if (pendingScenes.length === 0) return;
     setIsGenerating(true);
     setGenerationProgress(0);
-
-    const pendingScenes = scenes.filter((s) => s.status === 'pending' || s.status === 'error');
 
     await runWithPool(
       pendingScenes,
-      async (scene) => {
-        await generateSingleImage(scene.id);
-      },
-      (completed, total) => {
-        setGenerationProgress((completed / total) * 100);
-      }
+      async (scene) => generateSingleImage(scene.id),
+      (completed, total) => setGenerationProgress((completed / total) * 100)
     );
 
     setIsGenerating(false);
-
-    // Show animate popup if images were generated
-    if (pendingScenes.length > 0) {
-      setShowAnimatePopup(true);
-    }
   };
 
   const generateAllVideos = async () => {
-    if (!falApiKey) return;
-
+    const readyScenes = scenes.filter((s) => s.status === 'image-ready');
+    if (readyScenes.length === 0) return;
     setIsGenerating(true);
     setGenerationProgress(0);
 
-    const readyScenes = scenes.filter((s) => s.status === 'image-ready');
-
     await runWithPool(
       readyScenes,
-      async (scene) => {
-        await generateSingleVideo(scene.id);
-      },
-      (completed, total) => {
-        setGenerationProgress((completed / total) * 100);
-      }
+      async (scene) => generateSingleVideo(scene.id),
+      (completed, total) => setGenerationProgress((completed / total) * 100)
     );
 
     setIsGenerating(false);
@@ -390,353 +328,175 @@ export function GenerateStep() {
   const pendingCount = scenes.filter((s) => s.status === 'pending' || s.status === 'error').length;
   const imageReadyCount = scenes.filter((s) => s.status === 'image-ready').length;
   const videoReadyCount = scenes.filter((s) => s.status === 'video-ready').length;
-
-  // Cost calculations
-  const imageCost = pendingCount * COST_PER_IMAGE;
-  const videoCost = imageReadyCount * COST_PER_VIDEO;
-  const totalEstimatedCost = (scenes.length * COST_PER_IMAGE) + (scenes.length * COST_PER_VIDEO);
-
-  const handleGenerateImages = () => {
-    if (pendingCount > 0) {
-      setShowCostConfirm('images');
-    }
-  };
-
-  const handleGenerateVideos = () => {
-    if (imageReadyCount > 0) {
-      setShowCostConfirm('videos');
-    }
-  };
-
-  const confirmGeneration = () => {
-    if (showCostConfirm === 'images') {
-      generateAllImages();
-    } else if (showCostConfirm === 'videos') {
-      generateAllVideos();
-    }
-    setShowCostConfirm(null);
-  };
+  const totalEstimatedCost = scenes.length * COST_PER_IMAGE + scenes.length * COST_PER_VIDEO * videoDuration;
 
   return (
     <div className="w-full max-w-6xl mx-auto px-4">
-      <div className="text-center mb-12 animate-slide-up">
-        <h2 className="font-display text-5xl md:text-6xl uppercase tracking-wider mb-4">
-          <span className="gradient-text">Generate Visuals</span>
-        </h2>
-        <p className="text-[var(--text-secondary)] text-lg max-w-lg mx-auto">
-          Create AI images and animate them into video clips
-        </p>
+      <div className="text-center mb-8">
+        <h2 className="font-display text-5xl uppercase tracking-wider mb-2">Generate Visuals</h2>
       </div>
 
-      {/* Controls */}
-      <Card variant="default" className="mb-8 animate-slide-up">
-        <CardContent className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            {falApiKey ? (
-              <span className="flex items-center gap-2 text-sm text-[var(--cyan)] font-mono uppercase tracking-wider">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-                API Connected
-              </span>
-            ) : (
-              <span className="text-sm text-[var(--red)] font-mono uppercase tracking-wider">
-                Add API key in Audio step
-              </span>
-            )}
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-3">
-            <Button
-              variant="red"
-              onClick={handleGenerateImages}
-              disabled={isGenerating || pendingCount === 0 || !falApiKey}
-              isLoading={isGenerating}
-              className="gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-              Generate Images ({pendingCount})
-            </Button>
-
-            <Button
-              onClick={handleGenerateVideos}
-              disabled={isGenerating || imageReadyCount === 0 || !falApiKey}
-              isLoading={isGenerating}
-              variant="cyan"
-              className="gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-              </svg>
-              Animate All
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Model & Cost Info */}
-      <Card variant="yellow" className="mb-8 animate-slide-up">
+      <Card variant="default" className="mb-4">
         <CardContent className="py-4">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-[var(--yellow)] flex items-center justify-center flex-shrink-0">
-                <svg className="w-5 h-5 text-[var(--ink)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-              </div>
-              <div>
-                <p className="font-display text-sm uppercase tracking-wider text-[var(--ink)]">Powered by xAI Grok Imagine</p>
-                <p className="text-xs text-[var(--text-muted)]">Images & videos generated via FAL.ai API</p>
-              </div>
-            </div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="font-mono text-xs uppercase tracking-wider">Advanced Image Settings</p>
+            <Button size="sm" variant={enableImageAdvanced ? 'cyan' : 'secondary'} onClick={() => setEnableImageAdvanced((v) => !v)}>
+              {enableImageAdvanced ? 'On' : 'Off'}
+            </Button>
+          </div>
 
-            <div className="flex items-center gap-6 text-sm">
-              <div className="text-center">
-                <p className="font-mono text-xs text-[var(--text-muted)] uppercase">Image</p>
-                <p className="font-display text-lg text-[var(--ink)]">${COST_PER_IMAGE.toFixed(2)}</p>
-              </div>
-              <div className="text-center">
-                <p className="font-mono text-xs text-[var(--text-muted)] uppercase">Video (1s)</p>
-                <p className="font-display text-lg text-[var(--ink)]">${COST_PER_VIDEO.toFixed(2)}</p>
-              </div>
-              <div className="text-center border-l-2 border-[var(--ink)] pl-6">
-                <p className="font-mono text-xs text-[var(--text-muted)] uppercase">Est. Total</p>
-                <p className="font-display text-lg text-[var(--red)]">${totalEstimatedCost.toFixed(2)}</p>
-              </div>
+          {enableImageAdvanced && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <select value={imageModel} onChange={(e) => setImageModel(e.target.value as ImageModel)} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+                <option value="default">default</option>
+                <option value="flux-schnell">flux-schnell</option>
+                <option value="z-image-turbo">z-image-turbo</option>
+                <option value="seedream">seedream</option>
+                <option value="nano-banana">nano-banana</option>
+                <option value="nano-banana-2">nano-banana-2</option>
+                <option value="nano-banana-pro">nano-banana-pro</option>
+              </select>
+
+              <select value={imageResolution} onChange={(e) => setImageResolution(e.target.value as ImageResolution)} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+                <option value="auto">auto</option>
+                <option value="2k">2k</option>
+                <option value="4k">4k</option>
+              </select>
+
+              <select value={imageTool} onChange={(e) => setImageTool(e.target.value)} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+                <option value="general">general</option>
+                <option value="ai-anime-generator">ai-anime-generator</option>
+                <option value="ai-art-generator">ai-art-generator</option>
+                <option value="ai-photo-generator">ai-photo-generator</option>
+                <option value="ai-illustration-generator">ai-illustration-generator</option>
+                <option value="album-cover-generator">album-cover-generator</option>
+                <option value="movie-poster-generator">movie-poster-generator</option>
+              </select>
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card variant="default" className="mb-4">
+        <CardContent className="py-4">
+          <div className="flex items-center justify-between mb-3">
+            <p className="font-mono text-xs uppercase tracking-wider">Animation Settings</p>
+            <div className="flex gap-2 items-center">
+              <span className="text-[10px] uppercase pt-1">Prompt-to-Video</span>
+              <Button size="sm" variant={isPromptToVideo ? 'red' : 'secondary'} onClick={() => setIsPromptToVideo(!isPromptToVideo)}>
+                {isPromptToVideo ? 'ON' : 'OFF'}
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <select value={videoModel} onChange={(e) => setVideoModel(e.target.value as ExplicitVideoModel)} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+              {Object.keys(MODEL_DURATIONS).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+
+            <select value={videoQuality} onChange={(e) => setVideoQuality(e.target.value as Quality)} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+
+            <select value={videoDuration} onChange={(e) => setVideoDuration(Number(e.target.value))} className="h-10 px-3 border-2 border-[var(--ink)] bg-[var(--paper)] text-sm">
+              {allowedDurations.map((d) => (
+                <option key={d} value={d}>
+                  {d}s
+                </option>
+              ))}
+            </select>
           </div>
         </CardContent>
       </Card>
 
-      {/* Cost Confirmation Modal */}
+      <Card variant="default" className="mb-6">
+        <CardContent className="flex flex-col md:flex-row md:items-center justify-between gap-3 py-4">
+          <div className="text-sm font-mono">Est. Total: ${totalEstimatedCost.toFixed(2)}</div>
+          <div className="flex gap-2">
+            {!isPromptToVideo && (
+              <Button variant="red" disabled={isGenerating || pendingCount === 0} onClick={() => setShowCostConfirm('images')}>
+                Generate Images ({pendingCount})
+              </Button>
+            )}
+            <Button variant="cyan" disabled={isGenerating || imageReadyCount === 0} onClick={() => setShowCostConfirm('videos')}>
+              Animate All ({imageReadyCount})
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {showCostConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-[var(--ink)]/80"
-            onClick={() => setShowCostConfirm(null)}
-          />
-
-          <div className="relative w-full max-w-md bg-[var(--paper)] border-2 border-[var(--ink)] shadow-[8px_8px_0_var(--ink)] animate-scale-in">
-            <div className="p-6">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 bg-[var(--yellow)] flex items-center justify-center">
-                  <svg className="w-6 h-6 text-[var(--ink)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="font-display text-2xl uppercase tracking-wider text-[var(--ink)]">
-                    Confirm Generation
-                  </h3>
-                  <p className="text-sm text-[var(--text-muted)]">This will use your FAL.ai credits</p>
-                </div>
-              </div>
-
-              <div className="bg-[var(--paper-dark)] border-2 border-[var(--ink)] p-4 mb-6">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="font-mono text-sm uppercase tracking-wider text-[var(--text-secondary)]">
-                    {showCostConfirm === 'images' ? 'Images to generate' : 'Videos to create'}
-                  </span>
-                  <span className="font-display text-2xl text-[var(--ink)]">
-                    {showCostConfirm === 'images' ? pendingCount : imageReadyCount}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center pt-3 border-t-2 border-[var(--ink)]">
-                  <span className="font-mono text-sm uppercase tracking-wider text-[var(--text-secondary)]">
-                    Estimated cost
-                  </span>
-                  <span className="font-display text-3xl text-[var(--red)]">
-                    ${showCostConfirm === 'images' ? imageCost.toFixed(2) : videoCost.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-
-              <p className="text-xs text-[var(--text-muted)] mb-6 text-center">
-                Using <span className="font-mono text-[var(--ink)]">xai/grok-imagine{showCostConfirm === 'videos' ? '-video' : ''}</span> model via FAL.ai
-              </p>
-
-              <div className="flex gap-3">
-                <Button
-                  variant="ghost"
-                  onClick={() => setShowCostConfirm(null)}
-                  className="flex-1"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  variant="red"
-                  onClick={confirmGeneration}
-                  className="flex-1"
-                >
-                  Generate Now
-                </Button>
-              </div>
+          <div className="absolute inset-0 bg-[var(--ink)]/80" onClick={() => setShowCostConfirm(null)} />
+          <div className="relative w-full max-w-md bg-[var(--paper)] border-2 border-[var(--ink)] p-6">
+            <p className="mb-4 font-mono text-sm">CONFIRM EXPENDITURE OF APPROX. ${totalEstimatedCost.toFixed(3)}?</p>
+            <div className="flex gap-2">
+              <Button variant="ghost" className="flex-1" onClick={() => setShowCostConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="red"
+                className="flex-1"
+                onClick={() => {
+                  if (showCostConfirm === 'images') void generateAllImages();
+                  if (showCostConfirm === 'videos') void generateAllVideos();
+                  setShowCostConfirm(null);
+                }}
+              >
+                PROCEED
+              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Animate All Popup - Shows after images are generated */}
-      {showAnimatePopup && imageReadyCount > 0 && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-[var(--ink)]/80"
-            onClick={() => setShowAnimatePopup(false)}
-          />
-
-          <div className="relative w-full max-w-lg bg-[var(--paper)] border-2 border-[var(--ink)] shadow-[8px_8px_0_var(--red)] animate-scale-in">
-            <div className="p-8 text-center">
-              {/* Success Icon */}
-              <div className="w-20 h-20 bg-[var(--cyan)] mx-auto mb-6 flex items-center justify-center">
-                <svg className="w-10 h-10 text-[var(--ink)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-
-              <h3 className="font-display text-4xl uppercase tracking-wider text-[var(--ink)] mb-2">
-                Images Ready!
-              </h3>
-              <p className="text-lg text-[var(--text-secondary)] mb-2">
-                <span className="font-display text-3xl text-[var(--cyan)]">{imageReadyCount}</span> images generated successfully
-              </p>
-              <p className="text-sm text-[var(--text-muted)] mb-8">
-                Ready to bring them to life?
-              </p>
-
-              {/* Cost Preview */}
-              <div className="bg-[var(--paper-dark)] border-2 border-[var(--ink)] p-4 mb-6">
-                <div className="flex justify-between items-center">
-                  <span className="font-mono text-sm uppercase tracking-wider text-[var(--text-secondary)]">
-                    Estimated cost for {imageReadyCount} videos
-                  </span>
-                  <span className="font-display text-2xl text-[var(--red)]">
-                    ${videoCost.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex gap-4">
-                <Button
-                  variant="ghost"
-                  onClick={() => setShowAnimatePopup(false)}
-                  className="flex-1"
-                >
-                  Maybe Later
-                </Button>
-                <Button
-                  variant="red"
-                  onClick={() => {
-                    setShowAnimatePopup(false);
-                    setShowCostConfirm('videos');
-                  }}
-                  className="flex-1 gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  Animate All
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Media Preview Modal */}
       {previewMedia && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-[var(--ink)]/90"
-            onClick={() => setPreviewMedia(null)}
-          />
-
-          <div className="relative w-full max-w-5xl animate-scale-in">
-            {/* Close Button */}
-            <button
-              onClick={() => setPreviewMedia(null)}
-              className="absolute -top-12 right-0 w-10 h-10 bg-[var(--paper)] border-2 border-[var(--ink)] flex items-center justify-center hover:bg-[var(--red)] hover:text-white transition-colors z-10"
-            >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-
-            {/* Media Container */}
-            <div className="bg-[var(--ink)] border-2 border-[var(--ink)] shadow-[8px_8px_0_var(--red)]">
-              {previewMedia.type === 'image' ? (
-                <img
-                  src={`/api/proxy?url=${encodeURIComponent(previewMedia.url)}`}
-                  alt={previewMedia.prompt}
-                  className="w-full h-auto max-h-[75vh] object-contain"
-                />
-              ) : (
-                <video
-                  src={`/api/proxy?url=${encodeURIComponent(previewMedia.url)}`}
-                  controls
-                  autoPlay
-                  loop
-                  className="w-full h-auto max-h-[75vh] object-contain"
-                />
-              )}
-            </div>
-
-            {/* Caption */}
-            <div className="mt-4 bg-[var(--paper)] border-2 border-[var(--ink)] p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className={`px-2 py-1 text-xs font-mono uppercase tracking-wider ${
-                  previewMedia.type === 'video'
-                    ? 'bg-[var(--red)] text-white'
-                    : 'bg-[var(--cyan)] text-[var(--ink)]'
-                }`}>
-                  {previewMedia.type}
-                </span>
-              </div>
-              <p className="text-sm text-[var(--text-secondary)] line-clamp-2">
-                {previewMedia.prompt}
-              </p>
-            </div>
+          <div className="absolute inset-0 bg-[var(--ink)]/90" onClick={() => setPreviewMedia(null)} />
+          <div className="relative w-full max-w-5xl">
+            {previewMedia.type === 'image' ? (
+              <img src={mediaSrc(previewMedia.url)} alt={previewMedia.prompt} className="w-full h-auto max-h-[75vh] object-contain" />
+            ) : (
+              <video src={mediaSrc(previewMedia.url)} controls autoPlay loop className="w-full h-auto max-h-[75vh] object-contain" />
+            )}
           </div>
         </div>
       )}
 
-      {/* Progress */}
       {isGenerating && (
-        <div className="mb-8 animate-fade-in">
+        <div className="mb-6">
           <Progress value={generationProgress} variant="red" showLabel size="lg" />
         </div>
       )}
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-3 md:gap-4 mb-8">
+      <div className="grid grid-cols-3 gap-3 md:gap-4 mb-6">
         <Card variant="default">
           <CardContent className="py-4 text-center">
-            <p className="font-display text-4xl md:text-5xl text-[var(--text-muted)]">{pendingCount}</p>
-            <p className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">Pending</p>
+            <p className="text-3xl">{pendingCount}</p>
+            <p className="text-xs">Pending</p>
           </CardContent>
         </Card>
         <Card variant="cyan">
           <CardContent className="py-4 text-center">
-            <p className="font-display text-4xl md:text-5xl text-[var(--cyan)]">{imageReadyCount}</p>
-            <p className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">Images</p>
+            <p className="text-3xl">{imageReadyCount}</p>
+            <p className="text-xs">Images</p>
           </CardContent>
         </Card>
         <Card variant="red">
           <CardContent className="py-4 text-center">
-            <p className="font-display text-4xl md:text-5xl text-[var(--red)]">{videoReadyCount}</p>
-            <p className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">Videos</p>
+            <p className="text-3xl">{videoReadyCount}</p>
+            <p className="text-xs">Videos</p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Scene Grid */}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={handleDragEnd}
-      >
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={scenes.map((s) => s.id)} strategy={rectSortingStrategy}>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
             {scenes.map((scene, index) => (
@@ -753,18 +513,6 @@ export function GenerateStep() {
           </div>
         </SortableContext>
       </DndContext>
-
-      {scenes.length === 0 && (
-        <Card variant="default">
-          <CardContent className="py-16 text-center">
-            <svg className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            <p className="text-[var(--text-muted)] font-mono uppercase tracking-wider">No scenes to generate</p>
-            <p className="text-sm text-[var(--text-muted)] mt-2">Go back and add some scenes</p>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }
