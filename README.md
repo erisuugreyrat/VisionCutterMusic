@@ -2,8 +2,6 @@
 
 AI-powered music video generator. Upload a track, pick a visual style and story template, generate synchronized images and videos, export as a complete music video.
 
-**Live:** https://vision-cutter-music.vercel.app/
-
 ## Result
 
 ![Result](example.gif)
@@ -41,12 +39,3 @@ npm run dev
 ```
 
 Open http://localhost:3000
-
-## API Key
-
-Requires a FAL.ai API key. Get one at https://fal.ai
-
-## Cost
-
-- Image: $0.02 each
-- Video (1s): $0.052 each
