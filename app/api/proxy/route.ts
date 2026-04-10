@@ -524,6 +524,7 @@ export async function POST(request: NextRequest) {
     const magicHourTool = tool && isValidMagicHourTool(tool) ? tool : undefined;
     const imageUrl = body.imageUrl ?? body.assets?.imageFilePath;
     const outputKey = body.sceneId?.trim() || body.outputKey?.trim() || undefined;
+    const model = body.model?.trim();
 
     const resolvedAction: 'image' | 'video' | 'beat' | 'stitch' | 'compose' = (() => {
       if (
@@ -570,6 +571,7 @@ export async function POST(request: NextRequest) {
       const imagePayload: {
         imageCount: number;
         orientation: 'landscape' | 'square' | 'portrait';
+        model?: string;
         style: {
           prompt: string;
           tool?: MagicHourTool;
@@ -577,17 +579,21 @@ export async function POST(request: NextRequest) {
       } = {
         imageCount: 1,
         orientation,
+        ...(model ? { model } : {}),
         style: {
           prompt,
           ...(magicHourTool ? { tool: magicHourTool } : {}),
         },
       };
 
-      const result = await client.v1.aiImageGenerator.generate(imagePayload, {
-        waitForCompletion: true,
-        downloadOutputs: true,
-        downloadDirectory: OUTPUT_DIR,
-      });
+      const result = await client.v1.aiImageGenerator.generate(
+        imagePayload as Parameters<typeof client.v1.aiImageGenerator.generate>[0],
+        {
+          waitForCompletion: true,
+          downloadOutputs: true,
+          downloadDirectory: OUTPUT_DIR,
+        }
+      );
 
       const rawDownloadedPath = extractDownloadedPath(result);
       if (!rawDownloadedPath) {
@@ -610,7 +616,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'imageUrl is required for video generation' }, { status: 400 });
     }
 
-    const model = body.model?.trim();
     if (!model || model === 'default') {
       return NextResponse.json({ error: 'Explicit video model is required (e.g. ltx-2)' }, { status: 400 });
     }
@@ -647,9 +652,6 @@ export async function POST(request: NextRequest) {
     const safeResolution = normalizeResolution(body.resolution);
     if (safeResolution) payload.resolution = safeResolution;
     if (body.name?.trim()) payload.name = body.name.trim();
-
-    console.log('[proxy.video] incoming model:', body.model);
-    console.log('[proxy.video] forwarded model:', payload.model);
 
     const result = await client.v1.imageToVideo.generate(
       payload as Parameters<typeof client.v1.imageToVideo.generate>[0],
