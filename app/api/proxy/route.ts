@@ -225,6 +225,11 @@ async function downloadUrlToInputFile(url: string): Promise<string> {
 }
 
 async function resolveImageInputForVideo(imageUrl: string): Promise<string> {
+  // Magic Hour uploaded assets are already valid inputs.
+  if (imageUrl.startsWith('api-assets/')) {
+    return imageUrl;
+  }
+
   const localOutput = resolveLocalOutputPathFromUrlish(imageUrl);
   if (localOutput) {
     const ext = path.extname(localOutput) || '.png';
@@ -245,7 +250,9 @@ async function resolveImageInputForVideo(imageUrl: string): Promise<string> {
     return downloadUrlToInputFile(imageUrl);
   }
 
-  throw new Error('imageUrl must be /outputs/... or http(s) URL');
+  throw new Error(
+    'imageUrl must be api-assets/..., /outputs/... or http(s) URL'
+  );
 }
 
 function isImageExt(filePath: string): boolean {
@@ -622,18 +629,25 @@ export async function POST(request: NextRequest) {
 
     const inputImagePath = await resolveImageInputForVideo(imageUrl);
 
-    if (!fs.existsSync(inputImagePath)) {
-      return NextResponse.json(
+    if (
+    !inputImagePath.startsWith('api-assets/') &&
+    !fs.existsSync(inputImagePath)
+    ) {
+    return NextResponse.json(
         { error: 'Resolved input image does not exist', inputImagePath },
         { status: 400 }
-      );
+    );
     }
 
-    if (!isImageExt(inputImagePath)) {
-      return NextResponse.json(
+
+    if (
+    !inputImagePath.startsWith('api-assets/') &&
+    !isImageExt(inputImagePath)
+    ) {
+    return NextResponse.json(
         { error: 'Resolved input is not an image file', inputImagePath },
         { status: 400 }
-      );
+    );
     }
 
     const durationRaw = typeof body.endSeconds === 'number' ? body.endSeconds : body.duration;
