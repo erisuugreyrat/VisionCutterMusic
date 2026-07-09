@@ -4,6 +4,7 @@ type Quality = 'low' | 'medium' | 'high';
 export type VideoModel =
   | 'default'
   | 'ltx-2'
+  | 'ltx-2.3'
   | 'seedance'
   | 'kling-2.5'
   | 'kling-3.0'
