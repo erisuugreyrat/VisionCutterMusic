@@ -22,7 +22,7 @@ export type ImageModel =
   | 'nano-banana'
   | 'nano-banana-2'
   | 'nano-banana-pro'
-  | 'nano-banana-2-lit';
+  | 'nano-banana-2-lite';
 
 export type ImageResolution = 'auto' | '2k' | '4k';
 
