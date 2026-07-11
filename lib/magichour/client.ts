@@ -21,7 +21,8 @@ export type ImageModel =
   | 'seedream'
   | 'nano-banana'
   | 'nano-banana-2'
-  | 'nano-banana-pro';
+  | 'nano-banana-pro'
+  | 'nano-banana-2-lit';
 
 export type ImageResolution = 'auto' | '2k' | '4k';
 
